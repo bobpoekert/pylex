@@ -2,28 +2,33 @@ import c_pyflex
 
 class ScannerIter(object):
 
-    def __init__(self, module, handle):
+    def __init__(self, scanner, handle):
         self.handle = handle
-        self.module = module
+        self.scanner = scanner
 
     def __iter__(self):
         return self
 
     def next(self):
-        return self.module.next_token(self.handle)
+        return self.scanner.next_token(self.handle)
 
-class Scanner(object):
+class StateMachine(object):
 
-    def __init_(self, module):
-        self.module = module
+    def __init_(self, scanner):
+        self.scanner = scanner
 
     def scan_file(self, inf):
-        return ScannerIter(self.module, self.module.scan_file(inf.fileno(), inf.mode))
+        return ScannerIter(
+                self.scanner,
+                self.scanner.scan_file(inf.fileno(), inf.mode))
 
     def scan_string(self, string):
-        return ScannerIter(self.module, self.module.scan_string(string))
+        return ScannerIter(
+                self.scanner,
+                self.scanner.scan_string(string))
+
 
 def compile(patterns):
-    defn = c_pyflex.PatternDefinition(patterns)
-    mod = defn.compile()
-    return Scanner(mod)
+    thunker = c_pyflex.PatternDefinition(patterns)
+    thing = thunker.compile()
+    return StateMachine(thing)

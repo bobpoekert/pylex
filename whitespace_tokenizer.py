@@ -2,7 +2,7 @@ import pyflex
 
 tokenizer = pyflex.compile([
     ('token', '[^\s]+', True),
-    ('line_end', r'[\r\n]', True)
+    ('line_end', r'[\r\n]+', True)
 ])
 
 def tokenize(ins):

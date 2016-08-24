@@ -12,6 +12,17 @@ if os.access('/'.join(current_dir), os.W_OK):
 else:
     scratch_dir = os.path.abspath('~/.pyflex')
 
+debug = True
+devnull = open('/dev/null', 'w')
+if debug:
+    kwargs = {}
+else:
+    kwargs = dict(
+            stdout=devnull,
+            stderr=devnull)
+
+kwargs['cwd'] = sysconfig.PREFIX
+
 def compile_extension(c_fname, outp_fname):
     getvar = sysconfig.get_config_var
 
@@ -30,12 +41,7 @@ def compile_extension(c_fname, outp_fname):
     if not getvar('PYTHONFRAMEWORK'):
         libs.extend(getvar('LINKFORSHARED').split())
 
-    print includes, libs
-
-    sp.check_call(['gcc', '-g', '-Ofast', '-fPIC'] + includes + ['-c', c_fname, '-o', '%s.o' % outp_fname])
-    sp.check_call(['gcc', '-shared'] + libs + ['%s.o' % outp_fname, '-o', outp_fname])
-
-    os.unlink('%s.o' % outp_fname)
+    sp.check_call(['gcc'] + includes + ['-shared', '-fPIC', '-o', outp_fname] + libs + [c_fname], **kwargs)
 
 group_re = re.compile(r'\(\?\P\<(.+?)\>(.*?)\)')
 
@@ -182,11 +188,11 @@ class PatternDefinition(object):
         if True or not os.path.exists(self.so_filename()):
             with open(self.l_filename(), 'w') as outf:
                 self.write_flex(outf)
-            sp.check_call(['flex', self.l_filename()])
+            sp.check_call(['flex', self.l_filename()], **kwargs)
             compile_extension(self.c_filename(), self.so_filename())
-            os.unlink(self.c_filename())
-            os.unlink(self.h_filename())
-            os.unlink(self.l_filename())
+            #os.unlink(self.c_filename())
+            #os.unlink(self.h_filename())
+            #os.unlink(self.l_filename())
 
         if scratch_dir not in sys.path:
             sys.path.append(scratch_dir)
@@ -296,15 +302,12 @@ class PatternDefinition(object):
     };
 
     PyMODINIT_FUNC init_%(hash)s(void) {
-        printf("hello\\n");
-        (void) Py_InitModule("_%(hash)s", ScannerMethods);
-        printf("hello\\n");
         %(inits)s
-        printf("hello\\n");
+        (void) Py_InitModule("_%(hash)s", ScannerMethods);
     }
     ''' % dict(
             hash=self.hash(),
-            inits='\n'.join('result_token_%s = PyString_FromString("%s");' % (k, k) for k in self.keys())))
+            inits='\n'.join('result_token_%s = PyString_FromString("%s"); Py_INCREF(result_token_%s);' % (k, k, k) for k in self.keys())))
 
     def write_c_headers(self, outf):
         outf.write('#include <stdio.h>\n')
@@ -329,11 +332,7 @@ class PatternDefinition(object):
         return os.path.join(scratch_dir, '%s_scanner.l' % self.hash())
 
     def so_filename(self):
-        if platform.system == 'Linux':
-            suffix = 'so'
-        elif platform.system == 'Darwin':
-            suffix = 'dylib'
-        elif platform.system == 'Windows':
+        if platform.system == 'Windows':
             suffix = 'dll'
         else:
             suffix = 'so'
