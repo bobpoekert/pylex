@@ -4,6 +4,12 @@ import subprocess as sp
 import os, platform
 from distutils import sysconfig
 
+current_dir = os.path.split(os.path.abspath(__file__))[:-1]
+if os.access(current_dir, os.W_OK):
+    scratch_dir = os.path.join(current_dir + ['.pyflex'])
+else:
+    scratch_dir = os.path.abspath('~/.pyflex')
+
 def compile_extension(c_fname, outp_fname):
     getvar = sysconfig.get_config_var
 
@@ -101,7 +107,14 @@ def named_capture_group_rule(defn, name, pattern, emitting):
 
     return CompoundRule(rules)
 
-def new_rule(defn, name, pattern, emit):
+def new_rule(defn, rule):
+    if len(rule) == 3:
+        name, pattern, emit = rule
+    elif len(rule) == 2:
+        name, pattern = rule
+        emit = False
+    else:
+        raise ValueError(
     match = group_re.match(pattern)
     if match:
         if emit:
@@ -125,19 +138,25 @@ class PatternDefinition(object):
     def assert_unique_keys(self):
         ks = set([])
         for k, v in self.patterns:
-            assert k not in ks, 'duplicate definition for %s' % k
+            if k in ks:
+                raise ValueError('duplicate definition for %s' % k)
             ks.add(k)
+
+    def assert_valid_key_names(self):
+        for k in self.keys():
+            if not re.match('^[a-zA-Z0-9_]+$', k):
+                raise ValueError('invalid name: "%s". names can only contain letters, numbers, and underscores' % k)
 
     def do_assertions(self):
         self.assert_unique_keys()
+        self.assert_valid_key_names()
 
-    @property
     def keys(self):
         return [v[0] for v in self.patterns]
 
     def build_rules(self):
         for rule in self.patterns:
-            self.rules.append(new_rule(self, *rule))
+            self.rules.append(new_rule(self, rule))
         self.rule = CompoundRule(self.rules)
 
     def write_flex(self, outf):
@@ -153,6 +172,8 @@ class PatternDefinition(object):
         self.write_tail(outf)
 
     def compile(self):
+        if not os.path.exists(scratch_dir):
+            os.mkdir(scratch_dir)
         if not os.path.exists(self.so_filename()):
             with open(self.l_filename(), 'w') as outf:
                 self.write_flex(outf)
@@ -162,6 +183,8 @@ class PatternDefinition(object):
             os.unlink(self.h_filename())
             os.unlink(self.l_filename())
 
+        if scratch_dir not in sys.path:
+            sys.path.append(scratch_dir)
         return importlib.import_module(self.hash())
 
     def write_head(self, outf):
@@ -173,10 +196,8 @@ class PatternDefinition(object):
             outf.write('PyObject *result_token_%s;\n')
 
     def action_code(self, name):
-        return '''
-            Py_INCREF(result_token_%s);
-            return result_token_%s;
-        ''' % (name, name)
+        return 'return Py_BuildValue("(Os)", result_token_%s, yytext);' % name
+
 
     def write_module_definition(self, outf):
         outf.write('''
@@ -187,9 +208,21 @@ class PatternDefinition(object):
 
     const char *capsule_name = "c_pyflex.ParseContext";
 
-    PyObject *scan_file(PyObject *self, PyObject *args) {
-        parse_context *res_context = malloc(sizeof(parse_context));
+    void free_context(parse_context *inp_context) {
+        if (inp_context->buffer) {
+            yy_delete_buffer(inp_context->buffer);
+        }
+        if (inp_context->scanner) {
+            yylex_destroy(inp_context->scanner);
+        }
+        free(inp_context);
+    }
 
+    void free_context_capsule(PyObject *capsule) {
+        free_context((parse_context *) PyCapsule_GetPointer(capsule, capsule_name));
+    }
+
+    PyObject *scan_file(PyObject *self, PyObject *args) {
         yyscan_t scanner;
         YY_BUFFER_STATE state;
         int fileno;
@@ -207,10 +240,11 @@ class PatternDefinition(object):
         FILE *fileobj = fdopen(fileno, mode);
         state = yy_create_buffer(fileobj, -1);
 
+        parse_context *res_context = malloc(sizeof(parse_context));
         res_context->scanner = scanner;
         res_context->buffer = state;
 
-        return PyCapsule_New(res_context, capsule_name, 0);
+        return PyCapsule_New(res_context, capsule_name, free_context_capsule);
     }
 
     PyObject *scan_string(PyObject *self, PyObject *args) {
@@ -232,37 +266,23 @@ class PatternDefinition(object):
         res_context->scanner = scanner;
         res_context->buffer = buffer;
 
-        return PyCapsule_New(res_context, capsule_name, 0);
+        return PyCapsule_New(res_context, capsule_name, free_context_capsule);
     }
 
     PyObject *next_token(PyObject *self, PyObject *args) {
         PyObject *capsule;
-        if (!PyArg_ParseTuple(args, "o", &capsule)) {
+        if (!PyArg_ParseTuple(args, "O", &capsule)) {
             return 0;
         }
 
         parse_context *inp_context = (parse_context *) PyCapsule_GetPointer((PyCapsule *) capsule, capsule_name);
 
         yy_switch_to_buffer(inp_context->buffer);
-        int rescount = yylex();
-
-
-    }
-
-    PyObject *free_scanner(PyObject *self, PyObject *args) {
-        PyObject *capsule;
-        if (!PyArg_ParseTuple(args, "o", &capsule)) {
-            return 0;
+        PyObject *res = yyscan();
+        if (res == 0) {
+            PyErr_SetNone(PyExc_StopIteration);
         }
-
-        parse_context *inp_context = (parse_context *) PyCapsule_GetPointer((PyCapsule *) capsule, capsule_name);
-
-        yy_delete_buffer(inp_context->buffer);
-        yylex_destroy(inp_context->scanner);
-
-        free(inp_context);
-
-        Py_RETURN_NONE;
+        return res;
     }
 
     static PyMethodDef ScannerMethods[] = {
@@ -282,6 +302,7 @@ class PatternDefinition(object):
     def write_c_headers(self, outf):
         outf.write('#include <stdio.h>\n')
         outf.write('#include <Python.h>\n')
+        outf.write('#define YY_DECL PyObject *yyscan(void);\n')
 
     def write_tail(self, outf):
         self.write_module_definition(outf)
@@ -292,13 +313,13 @@ class PatternDefinition(object):
         return self._hash
 
     def c_filename(self):
-        return '%s_scanner.c' % self.hash()
+        return os.path.join(scratch_dir, '%s_scanner.c' % self.hash())
 
     def h_filename(self):
-        return '%s_scanner.h' % self.hash()
+        return os.path.join(scratch_dir, '%s_scanner.h' % self.hash())
 
     def l_filename(self):
-        return '%s_scanner.l' % self.hash()
+        return os.path.join(scratch_dir, '%s_scanner.l' % self.hash())
 
     def so_filename(self):
         if platform.system == 'Linux':
@@ -309,4 +330,4 @@ class PatternDefinition(object):
             suffix = 'dll'
         else:
             suffix = 'so'
-        return '%s.%s' % (self.hash(), suffix)
+        return os.path.join(scratch_dir, '%s.%s' % (self.hash(), suffix))
