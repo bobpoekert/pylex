@@ -1,12 +1,14 @@
 import re
 import tempfile
 import subprocess as sp
-import os, platform
+import os, platform, sys
 from distutils import sysconfig
+from hashlib import sha1
+import importlib
 
-current_dir = os.path.split(os.path.abspath(__file__))[:-1]
-if os.access(current_dir, os.W_OK):
-    scratch_dir = os.path.join(current_dir + ['.pyflex'])
+current_dir = os.path.abspath(__file__).split('/')[:-1]
+if os.access('/'.join(current_dir), os.W_OK):
+    scratch_dir = '/'.join(current_dir + ['.pyflex'])
 else:
     scratch_dir = os.path.abspath('~/.pyflex')
 
@@ -14,7 +16,7 @@ def compile_extension(c_fname, outp_fname):
     getvar = sysconfig.get_config_var
 
     includes = ['-I' + sysconfig.get_python_inc(), '-I'+sysconfig.get_python_inc(plat_specific=True)]
-    includes.extend(getvar('CFLAGS'))
+    includes.extend(getvar('CFLAGS').split())
 
     pyver = getvar('VERSION')
 
@@ -28,8 +30,10 @@ def compile_extension(c_fname, outp_fname):
     if not getvar('PYTHONFRAMEWORK'):
         libs.extend(getvar('LINKFORSHARED').split())
 
+    print includes, libs
+
     sp.check_call(['gcc', '-g', '-Ofast', '-fPIC'] + includes + ['-c', c_fname, '-o', '%s.o' % outp_fname])
-    sp.check_call(['gcc', '-shared', '-lfl'] + libs + ['%s.o' % outp_fname, '-o', output_fname])
+    sp.check_call(['gcc', '-shared'] + libs + ['%s.o' % outp_fname, '-o', outp_fname])
 
     os.unlink('%s.o' % outp_fname)
 
@@ -81,7 +85,7 @@ class EmittingRule(BaseRule):
         self.pattern = pattern
 
     def get_actions(self):
-        return '%s\t%%{%s%%}\n' % (self.pattern, self.defn.action_code(name))
+        return '%s\t%%{%s%%}\n' % (self.pattern, self.defn.action_code(self.name))
 
 def named_capture_group_rule(defn, name, pattern, emitting):
     rules = []
@@ -114,7 +118,7 @@ def new_rule(defn, rule):
         name, pattern = rule
         emit = False
     else:
-        raise ValueError(
+        raise ValueError('wrong number of arguments')
     match = group_re.match(pattern)
     if match:
         if emit:
@@ -137,7 +141,8 @@ class PatternDefinition(object):
 
     def assert_unique_keys(self):
         ks = set([])
-        for k, v in self.patterns:
+        for row in self.patterns:
+            k = row[0]
             if k in ks:
                 raise ValueError('duplicate definition for %s' % k)
             ks.add(k)
@@ -161,10 +166,10 @@ class PatternDefinition(object):
 
     def write_flex(self, outf):
         self.write_head(outf)
-        outf.write('%top {')
+        outf.write('%{\n')
         self.write_c_headers(outf)
         self.write_enum_definitions(outf)
-        outf.write('}')
+        outf.write('%}\n')
         outf.write(self.rule.get_definitions())
         outf.write('\n%%\n')
         outf.write(self.rule.get_actions())
@@ -174,7 +179,7 @@ class PatternDefinition(object):
     def compile(self):
         if not os.path.exists(scratch_dir):
             os.mkdir(scratch_dir)
-        if not os.path.exists(self.so_filename()):
+        if True or not os.path.exists(self.so_filename()):
             with open(self.l_filename(), 'w') as outf:
                 self.write_flex(outf)
             sp.check_call(['flex', self.l_filename()])
@@ -185,19 +190,18 @@ class PatternDefinition(object):
 
         if scratch_dir not in sys.path:
             sys.path.append(scratch_dir)
-        return importlib.import_module(self.hash())
+        return importlib.import_module('_%s' % self.hash())
 
     def write_head(self, outf):
         outf.write('%option reentrant stack noyywrap full\n')
-        outf.write('%option outfile="%s" header-file="%s"\n' % (self.c_filename(), self.h_filename()))
+        outf.write('%%option outfile="%s" header-file="%s"\n' % (self.c_filename(), self.h_filename()))
 
     def write_enum_definitions(self, outf):
-        for k in self.keys:
-            outf.write('PyObject *result_token_%s;\n')
+        for k in self.keys():
+            outf.write('PyObject *result_token_%s;\n' % k)
 
     def action_code(self, name):
         return 'return Py_BuildValue("(Os)", result_token_%s, yytext);' % name
-
 
     def write_module_definition(self, outf):
         outf.write('''
@@ -210,7 +214,7 @@ class PatternDefinition(object):
 
     void free_context(parse_context *inp_context) {
         if (inp_context->buffer) {
-            yy_delete_buffer(inp_context->buffer);
+            yy_delete_buffer(inp_context->buffer, inp_context->scanner);
         }
         if (inp_context->scanner) {
             yylex_destroy(inp_context->scanner);
@@ -238,7 +242,7 @@ class PatternDefinition(object):
         }
 
         FILE *fileobj = fdopen(fileno, mode);
-        state = yy_create_buffer(fileobj, -1);
+        state = yy_create_buffer(fileobj, -1, scanner);
 
         parse_context *res_context = malloc(sizeof(parse_context));
         res_context->scanner = scanner;
@@ -254,17 +258,16 @@ class PatternDefinition(object):
             return 0;
         }
         yyscan_t scanner;
-        YY_BUFFER_STATE buffer;
         if (yylex_init(&scanner) != 0) {
             PyErr_SetString(PyExc_RuntimeError, "failed to initialize flex");
             return 0;
         }
 
-        YY_BUFFER_STATE buffer = yy_scan_buffer(scanner, instring, stringlen);
+        YY_BUFFER_STATE buff = yy_scan_buffer(instring, stringlen, scanner);
 
         parse_context *res_context = malloc(sizeof(parse_context));
         res_context->scanner = scanner;
-        res_context->buffer = buffer;
+        res_context->buffer = buff;
 
         return PyCapsule_New(res_context, capsule_name, free_context_capsule);
     }
@@ -275,10 +278,10 @@ class PatternDefinition(object):
             return 0;
         }
 
-        parse_context *inp_context = (parse_context *) PyCapsule_GetPointer((PyCapsule *) capsule, capsule_name);
+        parse_context *inp_context = (parse_context *) PyCapsule_GetPointer((PyObject *) capsule, capsule_name);
 
-        yy_switch_to_buffer(inp_context->buffer);
-        PyObject *res = yyscan();
+        yy_switch_to_buffer(inp_context->buffer, inp_context->scanner);
+        PyObject *res = yylex(inp_context->scanner);
         if (res == 0) {
             PyErr_SetNone(PyExc_StopIteration);
         }
@@ -289,20 +292,24 @@ class PatternDefinition(object):
         {"scan_file", scan_file, METH_VARARGS, "Takes a file descriptor and returns a scanner handle"},
         {"scan_string", scan_string, METH_VARARGS, "Takes a string and returns a scanner handle"},
         {"next_token", next_token, METH_VARARGS, "Gets the next match from a scanner handle"},
-        {"free_scanner", free_scanner, METH_VARARGS, "Frees the scanner refered to by a handle"},
         {NULL, NULL, 0, NULL}
     };
 
-    PyMODINIT_FUNC init_scanner(void) {
-        %s
-        (void) Py_InitModule("_%s", ScannerMethods);
+    PyMODINIT_FUNC init_%(hash)s(void) {
+        printf("hello\\n");
+        (void) Py_InitModule("_%(hash)s", ScannerMethods);
+        printf("hello\\n");
+        %(inits)s
+        printf("hello\\n");
     }
-    ''' % ('\n'.join('result_token_%s = PyString_FromString("%s");' % (k, k) for k in self.keys), self.hash())
+    ''' % dict(
+            hash=self.hash(),
+            inits='\n'.join('result_token_%s = PyString_FromString("%s");' % (k, k) for k in self.keys())))
 
     def write_c_headers(self, outf):
         outf.write('#include <stdio.h>\n')
         outf.write('#include <Python.h>\n')
-        outf.write('#define YY_DECL PyObject *yyscan(void);\n')
+        outf.write('#define YY_DECL PyObject *yylex(yyscan_t yyscanner)\n')
 
     def write_tail(self, outf):
         self.write_module_definition(outf)
@@ -330,4 +337,4 @@ class PatternDefinition(object):
             suffix = 'dll'
         else:
             suffix = 'so'
-        return os.path.join(scratch_dir, '%s.%s' % (self.hash(), suffix))
+        return os.path.join(scratch_dir, '_%s.%s' % (self.hash(), suffix))

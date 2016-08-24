@@ -8,7 +8,7 @@ tokenizer = pyflex.compile([
 def tokenize(ins):
     line = []
     for kind, val in tokenizer.scan_string(ins):
-        if kind == 'token_match':
+        if kind == 'token':
             line.append(val)
         elif kind == 'line_end':
             yield line
@@ -19,3 +19,6 @@ def test():
     And this is another.'''
     parsed = list(tokenize(text))
     assert text == [['This', 'is', 'a', 'line.'], ['And', 'this', 'is', 'another.']]
+
+if __name__ == '__main__':
+    test()
