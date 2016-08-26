@@ -1,10 +1,12 @@
 import re
 import tempfile
 import subprocess as sp
-import os, platform, sys
+import os, platform, sys, shutil
 from distutils import sysconfig
 from hashlib import sha1
 import importlib
+from site import USER_BASE
+from distutils.ccompiler import new_compiler
 
 current_dir = os.path.abspath(__file__).split('/')[:-1]
 if os.access('/'.join(current_dir), os.W_OK):
@@ -21,27 +23,29 @@ else:
             stdout=devnull,
             stderr=devnull)
 
-kwargs['cwd'] = sysconfig.PREFIX
+#kwargs['cwd'] = sysconfig.PREFIX
 
 def compile_extension(c_fname, outp_fname):
+    compiler = new_compiler()
+
     getvar = sysconfig.get_config_var
 
-    includes = ['-I' + sysconfig.get_python_inc(), '-I'+sysconfig.get_python_inc(plat_specific=True)]
-    includes.extend(getvar('CFLAGS').split())
+    includes = [sysconfig.get_python_inc(), sysconfig.get_python_inc(plat_specific=True)]
+
+    libraries = []
+    library_dirs = []
+
+    library_dirs.append(getvar('LIBDIR'))
 
     pyver = getvar('VERSION')
 
-    libs = ['-lpython' + pyver]
-    libs += getvar('LIBS').split()
-    libs += getvar('SYSLIBS').split()
-    # add the prefix/lib/pythonX.Y/config dir, but only if there is no
-    # shared library in prefix/lib/.
-    if not getvar('Py_ENABLE_SHARED'):
-        libs.insert(0, '-L' + getvar('LIBPL'))
-    if not getvar('PYTHONFRAMEWORK'):
-        libs.extend(getvar('LINKFORSHARED').split())
+    libraries.append('python'+pyver)
 
-    sp.check_call(['gcc'] + includes + ['-shared', '-fPIC', '-o', outp_fname] + libs + [c_fname], **kwargs)
+    compiler.set_include_dirs(includes)
+    compiler.set_libraries(libraries)
+    compiler.set_library_dirs(library_dirs)
+    objects = compiler.compile([c_fname], output_dir=scratch_dir)
+    compiler.link_shared_object(objects, outp_fname, build_temp=scratch_dir)
 
 group_re = re.compile(r'\(\?\P\<(.+?)\>(.*?)\)')
 
@@ -188,7 +192,7 @@ class PatternDefinition(object):
         if True or not os.path.exists(self.so_filename()):
             with open(self.l_filename(), 'w') as outf:
                 self.write_flex(outf)
-            sp.check_call(['flex', self.l_filename()], **kwargs)
+            sp.check_call(['flex', os.path.abspath(self.l_filename())], **kwargs)
             compile_extension(self.c_filename(), self.so_filename())
             #os.unlink(self.c_filename())
             #os.unlink(self.h_filename())

@@ -14,7 +14,7 @@ class ScannerIter(object):
 
 class StateMachine(object):
 
-    def __init_(self, scanner):
+    def __init__(self, scanner):
         self.scanner = scanner
 
     def scan_file(self, inf):
