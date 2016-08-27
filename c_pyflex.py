@@ -252,6 +252,7 @@ class PatternDefinition(object):
     PyObject *scan_string(PyObject *self, PyObject *args) {
         char *instring;
         Py_ssize_t stringlen;
+        stringlen = 0;
         if (!PyArg_ParseTuple(args, "s#", &instring, &stringlen)) {
             return 0;
         }
@@ -261,7 +262,7 @@ class PatternDefinition(object):
             return 0;
         }
 
-        YY_BUFFER_STATE buff = yy_scan_buffer(instring, stringlen, scanner);
+        YY_BUFFER_STATE buff = yy_scan_buffer(instring, stringlen-1, scanner);
 
         parse_context *res_context = malloc(sizeof(parse_context));
         res_context->scanner = scanner;
