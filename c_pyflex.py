@@ -3,6 +3,9 @@ import tempfile
 import subprocess as sp
 import os, platform, sys, shutil
 from distutils import sysconfig
+from distutils.core import Extension
+from distutils.command.build_ext import build_ext
+from distutils.dist import Distribution
 from hashlib import sha1
 import importlib
 from site import USER_BASE
@@ -25,27 +28,15 @@ else:
 
 #kwargs['cwd'] = sysconfig.PREFIX
 
-def compile_extension(c_fname, outp_fname):
-    compiler = new_compiler()
+def compile_extension(c_fname, extension_name):
+    dist = Distribution(dict(
+        name=extension_name,
+        ext_modules=[Extension(extension_name, sources=[c_fname])]
+    ))
+    dist.script_args = ['build_ext', '--inplace', '--build-temp=%s' % scratch_dir]
+    dist.parse_command_line()
+    dist.run_commands()
 
-    getvar = sysconfig.get_config_var
-
-    includes = [sysconfig.get_python_inc(), sysconfig.get_python_inc(plat_specific=True)]
-
-    libraries = []
-    library_dirs = []
-
-    library_dirs.append(getvar('LIBDIR'))
-
-    pyver = getvar('VERSION')
-
-    libraries.append('python'+pyver)
-
-    compiler.set_include_dirs(includes)
-    compiler.set_libraries(libraries)
-    compiler.set_library_dirs(library_dirs)
-    objects = compiler.compile([c_fname], output_dir=scratch_dir)
-    compiler.link_shared_object(objects, outp_fname, build_temp=scratch_dir)
 
 group_re = re.compile(r'\(\?\P\<(.+?)\>(.*?)\)')
 
@@ -192,11 +183,8 @@ class PatternDefinition(object):
         if True or not os.path.exists(self.so_filename()):
             with open(self.l_filename(), 'w') as outf:
                 self.write_flex(outf)
-            sp.check_call(['flex', os.path.abspath(self.l_filename())], **kwargs)
-            compile_extension(self.c_filename(), self.so_filename())
-            #os.unlink(self.c_filename())
-            #os.unlink(self.h_filename())
-            #os.unlink(self.l_filename())
+            sp.check_call(['flex', self.l_filename()], **kwargs)
+            compile_extension(self.c_filename(), '_%s' % self.hash())
 
         if scratch_dir not in sys.path:
             sys.path.append(scratch_dir)
